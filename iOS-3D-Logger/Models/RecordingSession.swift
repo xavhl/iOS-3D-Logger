@@ -7,7 +7,6 @@ struct RecordingSession: Codable {
     var startTimestamp: Double
     var endTimestamp: Double
     var frameCount: Int
-    var imuSampleCount: Int
     var hasDepth: Bool
     var rgbResolution: [Int]
     var depthResolution: [Int]?
@@ -28,7 +27,6 @@ struct RecordingSession: Codable {
             startTimestamp: ProcessInfo.processInfo.systemUptime,
             endTimestamp: 0,
             frameCount: 0,
-            imuSampleCount: 0,
             hasDepth: hasDepth,
             rgbResolution: rgbResolution,
             depthResolution: depthResolution

@@ -12,134 +12,152 @@ final class ARSessionManager: NSObject, ObservableObject, ARSessionDelegate {
     @Published var frameCount = 0
     @Published var hasDepth = false
     @Published var trackingState: String = "Not Available"
+    @Published var currentSessionID: String?
+    @Published var logLines: [String] = []
 
     private var frameIndex = 0
     private var sessionMetadata: RecordingSession?
     private let ciContext = CIContext()
+    private var isPreviewRunning = false
+    private var arConfig: ARWorldTrackingConfiguration?
 
     override init() {
         super.init()
         session.delegate = self
     }
 
-    func startRecording() {
+    func startPreview() {
+        guard !isPreviewRunning else { return }
+        let config = makeConfig()
+        arConfig = config
+        session.run(config)
+        isPreviewRunning = true
+    }
+
+    private func makeConfig() -> ARWorldTrackingConfiguration {
         let config = ARWorldTrackingConfiguration()
 
-        // Enable LiDAR depth if available
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
-            hasDepth = true
-        } else {
-            hasDepth = false
         }
 
         config.isAutoFocusEnabled = true
 
-        // Prefer highest resolution video format
         if let bestFormat = ARWorldTrackingConfiguration.supportedVideoFormats.first {
             config.videoFormat = bestFormat
         }
 
-        session.run(config)
+        return config
+    }
+
+    func startRecording() {
+        if !isPreviewRunning {
+            startPreview()
+        }
+
+        let supportsDepth = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+        hasDepth = supportsDepth
 
         let sessionURL = dataWriter.createSession()
         let sessionID = sessionURL.lastPathComponent
+        currentSessionID = sessionID
 
         let rgbRes: [Int]
-        if let fmt = config.videoFormat as ARConfiguration.VideoFormat? {
+        if let fmt = arConfig?.videoFormat {
             rgbRes = [Int(fmt.imageResolution.width), Int(fmt.imageResolution.height)]
         } else {
             rgbRes = [1920, 1440]
         }
 
-        var depthRes: [Int]? = nil
-        if hasDepth {
-            depthRes = [256, 192] // Standard LiDAR resolution on iPhone/iPad
-        }
-
         sessionMetadata = RecordingSession.create(
             sessionID: sessionID,
-            hasDepth: hasDepth,
+            hasDepth: supportsDepth,
             rgbResolution: rgbRes,
-            depthResolution: depthRes
+            depthResolution: supportsDepth ? [256, 192] : nil
         )
 
         frameIndex = 0
         frameCount = 0
+        logLines = []
+        addLog("Started: \(sessionID)")
 
-        imuRecorder.start(dataWriter: dataWriter)
+        imuRecorder.start()
         isRecording = true
     }
 
     func stopRecording() {
         isRecording = false
         imuRecorder.stop()
-        session.pause()
 
         guard var metadata = sessionMetadata else { return }
         metadata.endTimestamp = ProcessInfo.processInfo.systemUptime
         metadata.frameCount = frameIndex
-        metadata.imuSampleCount = imuRecorder.sampleCount
         dataWriter.finalizeSession(metadata: metadata)
+
+        addLog("Saved \(frameIndex) frames")
+
         sessionMetadata = nil
+        currentSessionID = nil
+    }
+
+    private func addLog(_ msg: String) {
+        DispatchQueue.main.async {
+            self.logLines.append(msg)
+            if self.logLines.count > 3 {
+                self.logLines.removeFirst()
+            }
+        }
     }
 
     // MARK: - ARSessionDelegate
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        guard isRecording else { return }
-
-        let index = frameIndex
-        frameIndex += 1
-
-        DispatchQueue.main.async {
-            self.frameCount = self.frameIndex
-        }
-
-        // Update tracking state
         let state: String
         switch frame.camera.trackingState {
         case .normal: state = "normal"
         case .limited(let reason):
             switch reason {
-            case .excessiveMotion: state = "limited_excessive_motion"
-            case .insufficientFeatures: state = "limited_insufficient_features"
-            case .initializing: state = "limited_initializing"
-            case .relocalizing: state = "limited_relocalizing"
-            @unknown default: state = "limited_unknown"
+            case .excessiveMotion: state = "limited_motion"
+            case .insufficientFeatures: state = "limited_features"
+            case .initializing: state = "initializing"
+            case .relocalizing: state = "relocalizing"
+            @unknown default: state = "limited"
             }
         case .notAvailable: state = "not_available"
         }
         DispatchQueue.main.async { self.trackingState = state }
 
+        guard isRecording else { return }
+
+        let index = frameIndex
+        frameIndex += 1
+
         // RGB frame -> JPEG
         let ciImage = CIImage(cvPixelBuffer: frame.capturedImage)
-        if let jpegData = ciContext.jpegRepresentation(
+        let jpegData = ciContext.jpegRepresentation(
             of: ciImage,
             colorSpace: CGColorSpaceCreateDeviceRGB(),
             options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9]
-        ) {
+        )
+        if let jpegData {
             dataWriter.writeRGBFrame(index: index, jpegData: jpegData)
         }
 
-        // Depth map
+        // Depth + confidence (per-frame, synced to this ARFrame)
+        var depthW = 0, depthH = 0
         if let depthMap = frame.sceneDepth?.depthMap {
             dataWriter.writeDepthMap(index: index, depthBuffer: depthMap)
-
-            // Update actual depth resolution in metadata on first frame
+            depthW = CVPixelBufferGetWidth(depthMap)
+            depthH = CVPixelBufferGetHeight(depthMap)
             if index == 0 {
-                let w = CVPixelBufferGetWidth(depthMap)
-                let h = CVPixelBufferGetHeight(depthMap)
-                sessionMetadata?.depthResolution = [w, h]
+                sessionMetadata?.depthResolution = [depthW, depthH]
             }
         }
-
-        // Confidence map
         if let confidenceMap = frame.sceneDepth?.confidenceMap {
             dataWriter.writeConfidenceMap(index: index, confidenceBuffer: confidenceMap)
         }
 
-        // Frame metadata
+        // Build unified per-frame metadata (everything synced to frame.timestamp)
         let transform = frame.camera.transform
         let intrinsics = frame.camera.intrinsics
         let resolution = frame.camera.imageResolution
@@ -167,19 +185,38 @@ final class ARSessionManager: NSObject, ObservableObject, ARSessionDelegate {
             "tracking_state": state,
             "exposure_duration": frame.camera.exposureDuration,
             "exposure_offset": frame.camera.exposureOffset,
+            "has_depth": frame.sceneDepth != nil,
         ]
 
-        // Feature points
+        if depthW > 0 {
+            meta["depth_resolution"] = [depthW, depthH]
+        }
+
         if let points = frame.rawFeaturePoints {
             meta["feature_point_count"] = points.points.count
         }
 
-        // Light estimate
         if let light = frame.lightEstimate {
             meta["ambient_intensity"] = light.ambientIntensity
             meta["ambient_color_temperature"] = light.ambientColorTemperature
         }
 
+        // IMU data synced per-frame
+        if let imu = imuRecorder.currentReading() {
+            for (key, value) in imu {
+                meta[key] = value
+            }
+        }
+
         dataWriter.appendFrameMetadata(meta)
+
+        // Update UI
+        DispatchQueue.main.async {
+            self.frameCount = self.frameIndex
+        }
+
+        if index % 30 == 0 && index > 0 {
+            addLog("f:\(index) trk:\(state)")
+        }
     }
 }
