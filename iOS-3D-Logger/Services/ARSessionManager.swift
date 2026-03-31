@@ -2,11 +2,13 @@ import Foundation
 import ARKit
 import CoreImage
 import Combine
+import UIKit
 
 final class ARSessionManager: NSObject, ObservableObject, ARSessionDelegate {
     let session = ARSession()
     let dataWriter = DataWriter()
     let imuRecorder = IMURecorder()
+    let frameFilter = FrameFilter()
 
     @Published var isRecording = false
     @Published var frameCount = 0
@@ -14,16 +16,53 @@ final class ARSessionManager: NSObject, ObservableObject, ARSessionDelegate {
     @Published var trackingState: String = "Not Available"
     @Published var currentSessionID: String?
     @Published var logLines: [String] = []
+    @Published var movingTooFast = false
 
     private var frameIndex = 0
+    private var droppedCount = 0
     private var sessionMetadata: RecordingSession?
     private let ciContext = CIContext()
     private var isPreviewRunning = false
     private var arConfig: ARWorldTrackingConfiguration?
 
+    private var _cgOrientation: CGImagePropertyOrientation = .right
+    private let orientationLock = NSLock()
+    private var cgOrientation: CGImagePropertyOrientation {
+        get { orientationLock.lock(); defer { orientationLock.unlock() }; return _cgOrientation }
+        set { orientationLock.lock(); defer { orientationLock.unlock() }; _cgOrientation = newValue }
+    }
+    private var orientationString: String = "portrait"
+
+    private var hideTooFastTask: DispatchWorkItem?
+
     override init() {
         super.init()
         session.delegate = self
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(deviceOrientationChanged),
+            name: UIDevice.orientationDidChangeNotification,
+            object: nil
+        )
+        updateOrientation()
+    }
+
+    deinit {
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+    }
+
+    @objc private func deviceOrientationChanged() { updateOrientation() }
+
+    private func updateOrientation() {
+        let o = UIDevice.current.orientation
+        switch o {
+        case .portrait:            cgOrientation = .right; orientationString = "portrait"
+        case .portraitUpsideDown:  cgOrientation = .left;  orientationString = "portraitUpsideDown"
+        case .landscapeLeft:       cgOrientation = .down;  orientationString = "landscapeLeft"
+        case .landscapeRight:      cgOrientation = .up;    orientationString = "landscapeRight"
+        default: break
+        }
     }
 
     func startPreview() {
@@ -32,28 +71,23 @@ final class ARSessionManager: NSObject, ObservableObject, ARSessionDelegate {
         arConfig = config
         session.run(config)
         isPreviewRunning = true
+        hasDepth = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
     }
 
     private func makeConfig() -> ARWorldTrackingConfiguration {
         let config = ARWorldTrackingConfiguration()
-
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
         }
-
         config.isAutoFocusEnabled = true
-
         if let bestFormat = ARWorldTrackingConfiguration.supportedVideoFormats.first {
             config.videoFormat = bestFormat
         }
-
         return config
     }
 
     func startRecording() {
-        if !isPreviewRunning {
-            startPreview()
-        }
+        if !isPreviewRunning { startPreview() }
 
         let supportsDepth = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
         hasDepth = supportsDepth
@@ -77,9 +111,12 @@ final class ARSessionManager: NSObject, ObservableObject, ARSessionDelegate {
         )
 
         frameIndex = 0
+        droppedCount = 0
         frameCount = 0
         logLines = []
+        frameFilter.reset()
         addLog("Started: \(sessionID)")
+        addLog("Filter: \(Int(frameFilter.targetFPS))fps, sharpness≥\(Int(frameFilter.minSharpness))")
 
         imuRecorder.start()
         isRecording = true
@@ -94,7 +131,7 @@ final class ARSessionManager: NSObject, ObservableObject, ARSessionDelegate {
         metadata.frameCount = frameIndex
         dataWriter.finalizeSession(metadata: metadata)
 
-        addLog("Saved \(frameIndex) frames")
+        addLog("Saved \(frameIndex) frames, dropped \(droppedCount)")
 
         sessionMetadata = nil
         currentSessionID = nil
@@ -103,9 +140,7 @@ final class ARSessionManager: NSObject, ObservableObject, ARSessionDelegate {
     private func addLog(_ msg: String) {
         DispatchQueue.main.async {
             self.logLines.append(msg)
-            if self.logLines.count > 3 {
-                self.logLines.removeFirst()
-            }
+            if self.logLines.count > 3 { self.logLines.removeFirst() }
         }
     }
 
@@ -129,35 +164,53 @@ final class ARSessionManager: NSObject, ObservableObject, ARSessionDelegate {
 
         guard isRecording else { return }
 
+        // Run frame filter
+        let result = frameFilter.evaluate(frame: frame)
+
+        // Show toast on fast movement; ignore re-triggers while timer is running
+        if frameFilter.isMovingTooFast && hideTooFastTask == nil {
+            DispatchQueue.main.async { self.movingTooFast = true }
+            let task = DispatchWorkItem {
+                DispatchQueue.main.async { self.movingTooFast = false }
+                self.hideTooFastTask = nil
+            }
+            hideTooFastTask = task
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1.0, execute: task)
+        }
+
+        if !result.shouldKeep {
+            droppedCount += 1
+            return
+        }
+
         let index = frameIndex
         frameIndex += 1
 
-        // RGB frame -> JPEG
-        let ciImage = CIImage(cvPixelBuffer: frame.capturedImage)
-        let jpegData = ciContext.jpegRepresentation(
+        // RGB -> JPEG with device orientation correction
+        let capturedOrientation = cgOrientation
+        let capturedOrientationString = orientationString
+        let ciImage = CIImage(cvPixelBuffer: frame.capturedImage).oriented(capturedOrientation)
+        if let jpegData = ciContext.jpegRepresentation(
             of: ciImage,
             colorSpace: CGColorSpaceCreateDeviceRGB(),
             options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9]
-        )
-        if let jpegData {
+        ) {
             dataWriter.writeRGBFrame(index: index, jpegData: jpegData)
         }
 
-        // Depth + confidence (per-frame, synced to this ARFrame)
+        // Depth + confidence
         var depthW = 0, depthH = 0
         if let depthMap = frame.sceneDepth?.depthMap {
             dataWriter.writeDepthMap(index: index, depthBuffer: depthMap)
             depthW = CVPixelBufferGetWidth(depthMap)
             depthH = CVPixelBufferGetHeight(depthMap)
-            if index == 0 {
-                sessionMetadata?.depthResolution = [depthW, depthH]
-            }
+            if index == 0 { sessionMetadata?.depthResolution = [depthW, depthH] }
         }
         if let confidenceMap = frame.sceneDepth?.confidenceMap {
             dataWriter.writeConfidenceMap(index: index, confidenceBuffer: confidenceMap)
         }
 
-        // Build unified per-frame metadata (everything synced to frame.timestamp)
+        // Per-frame metadata
         let transform = frame.camera.transform
         let intrinsics = frame.camera.intrinsics
         let resolution = frame.camera.imageResolution
@@ -183,40 +236,25 @@ final class ARSessionManager: NSObject, ObservableObject, ARSessionDelegate {
                 frame.camera.eulerAngles.z,
             ],
             "tracking_state": state,
+            "device_orientation": capturedOrientationString,
             "exposure_duration": frame.camera.exposureDuration,
             "exposure_offset": frame.camera.exposureOffset,
             "has_depth": frame.sceneDepth != nil,
+            "frame_sharpness": result.sharpness,
         ]
 
-        if depthW > 0 {
-            meta["depth_resolution"] = [depthW, depthH]
-        }
-
-        if let points = frame.rawFeaturePoints {
-            meta["feature_point_count"] = points.points.count
-        }
-
+        if depthW > 0 { meta["depth_resolution"] = [depthW, depthH] }
+        if let points = frame.rawFeaturePoints { meta["feature_point_count"] = points.points.count }
         if let light = frame.lightEstimate {
             meta["ambient_intensity"] = light.ambientIntensity
             meta["ambient_color_temperature"] = light.ambientColorTemperature
         }
-
-        // IMU data synced per-frame
         if let imu = imuRecorder.currentReading() {
-            for (key, value) in imu {
-                meta[key] = value
-            }
+            for (key, value) in imu { meta[key] = value }
         }
 
         dataWriter.appendFrameMetadata(meta)
 
-        // Update UI
-        DispatchQueue.main.async {
-            self.frameCount = self.frameIndex
-        }
-
-        if index % 30 == 0 && index > 0 {
-            addLog("f:\(index) trk:\(state)")
-        }
+        DispatchQueue.main.async { self.frameCount = self.frameIndex }
     }
 }
