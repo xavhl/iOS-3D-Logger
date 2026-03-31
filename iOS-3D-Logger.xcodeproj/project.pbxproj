@@ -15,6 +15,7 @@
 		AA000006 /* DataWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000016 /* DataWriter.swift */; };
 		AA000007 /* RecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000017 /* RecordingSession.swift */; };
 		AA000008 /* SessionBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000018 /* SessionBrowserView.swift */; };
+		AA000009 /* FrameFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000019 /* FrameFilter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +28,7 @@
 		AA000016 /* DataWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataWriter.swift; sourceTree = "<group>"; };
 		AA000017 /* RecordingSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingSession.swift; sourceTree = "<group>"; };
 		AA000018 /* SessionBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionBrowserView.swift; sourceTree = "<group>"; };
+		AA000019 /* FrameFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameFilter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -67,6 +69,7 @@
 				AA000014 /* ARSessionManager.swift */,
 				AA000015 /* IMURecorder.swift */,
 				AA000016 /* DataWriter.swift */,
+				AA000019 /* FrameFilter.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -163,6 +166,7 @@
 				AA000006 /* DataWriter.swift in Sources */,
 				AA000007 /* RecordingSession.swift in Sources */,
 				AA000008 /* SessionBrowserView.swift in Sources */,
+				AA000009 /* FrameFilter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
