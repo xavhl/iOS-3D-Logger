@@ -9,6 +9,8 @@ struct SessionBrowserView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var sessions: [SessionInfo] = []
     @State private var sharePayload: SharePayload? = nil
+    @State private var isZipping = false
+    @State private var zipError: String? = nil
 
     var body: some View {
         NavigationView {
@@ -40,6 +42,32 @@ struct SessionBrowserView: View {
             .refreshable { loadSessions() }
             .sheet(item: $sharePayload) { payload in
                 ShareSheet(items: payload.items)
+            }
+            .alert("Export Failed", isPresented: Binding(
+                get: { zipError != nil },
+                set: { if !$0 { zipError = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(zipError ?? "")
+            }
+            .overlay {
+                if isZipping {
+                    ZStack {
+                        Color.black.opacity(0.4).ignoresSafeArea()
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .tint(.white)
+                                .scaleEffect(1.4)
+                            Text("Preparing export…")
+                                .foregroundColor(.white)
+                                .font(.subheadline)
+                        }
+                        .padding(32)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(16)
+                    }
+                }
             }
         }
     }
@@ -86,24 +114,39 @@ struct SessionBrowserView: View {
     }
 
     private func exportSession(_ session: SessionInfo) {
-        var filesToShare: [URL] = []
-        let fm = FileManager.default
+        isZipping = true
+        let sessionURL = session.url
+        let zipName = session.id + ".zip"
+        let zipURL = FileManager.default.temporaryDirectory.appendingPathComponent(zipName)
 
-        let metaURL = session.url.appendingPathComponent("metadata.json")
-        if fm.fileExists(atPath: metaURL.path) {
-            filesToShare.append(metaURL)
+        DispatchQueue.global(qos: .userInitiated).async {
+            try? FileManager.default.removeItem(at: zipURL)
+
+            let coordinator = NSFileCoordinator()
+            var coordError: NSError?
+            var zipError: String? = nil
+
+            coordinator.coordinate(readingItemAt: sessionURL, options: .forUploading, error: &coordError) { tmpURL in
+                do {
+                    try FileManager.default.copyItem(at: tmpURL, to: zipURL)
+                } catch {
+                    zipError = error.localizedDescription
+                }
+            }
+
+            if coordError != nil {
+                zipError = coordError?.localizedDescription
+            }
+
+            DispatchQueue.main.async {
+                isZipping = false
+                if let err = zipError {
+                    self.zipError = err
+                } else {
+                    sharePayload = SharePayload(items: [zipURL])
+                }
+            }
         }
-
-        let framesURL = session.url.appendingPathComponent("frames.jsonl")
-        if fm.fileExists(atPath: framesURL.path) {
-            filesToShare.append(framesURL)
-        }
-
-        if filesToShare.isEmpty {
-            filesToShare.append(session.url)
-        }
-
-        sharePayload = SharePayload(items: filesToShare)
     }
 
     private func deleteSessions(at offsets: IndexSet) {
