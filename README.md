@@ -46,6 +46,14 @@ The depth button (bottom-right) toggles a live false-color depth overlay (blue =
 
 ---
 
+## Screenshots
+
+| Camera view | Depth overlay |
+|:-----------:|:-------------:|
+| ![Camera view](docs/assets/demo.png) | ![Depth overlay](docs/assets/demo-depth.png) |
+
+---
+
 ## Output Structure
 
 Each recording is saved to the app's Documents directory (accessible via Files app or Finder):
@@ -156,13 +164,15 @@ iOS-3D-Logger/
 │   ├── SessionBrowserView.swift     # Session list and export
 │   ├── Services/
 │   │   ├── ARSessionManager.swift   # ARKit session, per-frame data extraction
+│   │   ├── FrameFilter.swift        # fps / motion / sharpness frame gating
 │   │   ├── IMURecorder.swift        # CoreMotion device motion (per-frame sampling)
 │   │   └── DataWriter.swift         # Async disk I/O
 │   ├── Models/
 │   │   └── RecordingSession.swift   # Session metadata model
 │   └── Assets.xcassets/
 └── docs/
-    └── frames_jsonl_format.md       # Full output format reference
+    ├── frames_jsonl_format.md       # Full output format reference
+    └── assets/                      # Screenshots
 ```
 
 ---
