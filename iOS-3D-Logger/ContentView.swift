@@ -105,6 +105,27 @@ struct ContentView: View {
                     .ignoresSafeArea()
             }
 
+            // Too-fast toast
+            if manager.movingTooFast {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.yellow)
+                        Text("Slow down")
+                            .fontWeight(.semibold)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.75))
+                    .cornerRadius(22)
+                    .padding(.bottom, 130)
+                    .transition(.opacity.combined(with: .scale))
+                }
+                .animation(.easeInOut(duration: 0.25), value: manager.movingTooFast)
+            }
+
             VStack(spacing: 0) {
                 Spacer()
 
@@ -239,7 +260,16 @@ class DepthStreamUIView: UIView {
         guard let frame = session?.currentFrame,
               let depthMap = frame.sceneDepth?.depthMap else { return }
 
-        let ciImage = CIImage(cvPixelBuffer: depthMap)
+        let orientation: CGImagePropertyOrientation
+        switch UIDevice.current.orientation {
+        case .portrait:            orientation = .right
+        case .portraitUpsideDown:  orientation = .left
+        case .landscapeLeft:       orientation = .down
+        case .landscapeRight:      orientation = .up
+        default:                   orientation = .right
+        }
+
+        let ciImage = CIImage(cvPixelBuffer: depthMap).oriented(orientation)
         let filtered = ciImage.applyingFilter("CIFalseColor", parameters: [
             "inputColor0": CIColor(red: 0, green: 0, blue: 1, alpha: 1),
             "inputColor1": CIColor(red: 1, green: 0, blue: 0, alpha: 1),
